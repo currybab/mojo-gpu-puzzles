@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "max>=25.4.0.dev2025051305",
     "poethepoet>=0.34.0",
+    "scipy>=1.15.3",
 ]
 
 [[tool.uv.index]]
