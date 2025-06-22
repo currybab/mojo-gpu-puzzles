@@ -6,6 +6,7 @@ from gpu.host import DeviceContext
 from gpu import thread_idx, block_idx, block_dim, barrier
 from layout import Layout, LayoutTensor
 from layout.tensor_builder import LayoutTensorBuild as tb
+from math import ceildiv
 
 
 alias TPB = 3
@@ -26,6 +27,11 @@ fn naive_matmul[
     row = block_dim.y * block_idx.y + thread_idx.y
     col = block_dim.x * block_idx.x + thread_idx.x
     # FILL ME IN (roughly 6 lines)
+    if row < size and col < size:
+        v: output.element_type = 0
+        for i in range(size):
+            v += a[row, i] * b[i, col]
+        output[row, col] = v
 
 
 # ANCHOR_END: naive_matmul
@@ -44,6 +50,23 @@ fn single_block_matmul[
     local_row = thread_idx.y
     local_col = thread_idx.x
     # FILL ME IN (roughly 12 lines)
+    a_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+    b_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+
+    if row < size and col < size:
+        a_shared[local_row, local_col] = a[row, col]
+        b_shared[local_row, local_col] = b[row, col]
+
+    barrier()
+
+    if row < size and col < size:
+        var acc: output.element_type = 0
+
+        @parameter
+        for k in range(size):
+            acc += a_shared[local_row, k] * b_shared[k, local_col]
+
+        output[row, col] = acc
 
 
 # ANCHOR_END: single_block_matmul
@@ -67,6 +90,28 @@ fn matmul_tiled[
     global_row = block_idx.y * TPB + local_row
     global_col = block_idx.x * TPB + local_col
     # FILL ME IN (roughly 20 lines)
+    a_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+    b_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+    
+    acc: output.element_type = 0
+    for tile_idx in range(ceildiv(size, TPB)):
+        if local_row < TPB and local_col < TPB:
+            a_shared[local_row, local_col] = 0
+            b_shared[local_row, local_col] = 0
+        barrier()
+
+        if tile_idx * TPB + local_col < size and global_row < size:
+            a_shared[local_row, local_col] = a[global_row, tile_idx * TPB + local_col]
+        if tile_idx * TPB + local_row < size and global_col < size:
+            b_shared[local_row, local_col] = b[tile_idx * TPB + local_row, global_col]
+        barrier()
+
+        if global_row < size and global_col < size:
+            for k in range(min(TPB, size - tile_idx * TPB)):
+                acc += a_shared[local_row, k] * b_shared[k, local_col]
+        barrier()
+    if global_row < size and global_col < size:
+        output[global_row, global_col] = acc
 
 
 # ANCHOR_END: matmul_tiled
