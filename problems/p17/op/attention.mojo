@@ -81,8 +81,25 @@ fn transpose_kernel[
     inp: LayoutTensor[mut=False, dtype, layout_in, MutableAnyOrigin],
 ):
     # FILL ME IN (roughly 18 lines)
-    ...
+    shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
 
+    local_row = thread_idx.y
+    local_col = thread_idx.x
+
+    global_row = block_idx.y * TPB + local_row
+    global_col = block_idx.x * TPB + local_col
+
+    if global_row < rows and global_col < cols:
+        shared[local_row, local_col] = inp[global_row, global_col]
+    else:
+        shared[local_row, local_col] = 0.0
+    barrier()
+
+    out_row = block_idx.x * TPB + local_row
+    out_col = block_idx.y * TPB + local_col
+
+    if out_row < cols and out_col < rows:
+        output[out_row, out_col] = shared[local_col, local_row]
 
 # ANCHOR_END: transpose_kernel
 
@@ -278,27 +295,68 @@ struct AttentionCustomOp:
 
             # Step 1: Reshape Q from (d,) to (1, d) - no buffer needed
             # FILL ME IN 1 line
+            q_2d = q_tensor.reshape[layout_q_2d]()
 
             # Step 2: Transpose K from (seq_len, d) to K^T (d, seq_len)
             # FILL ME IN 1 function call
+            gpu_ctx.enqueue_function[
+                transpose_kernel[layout_k, layout_k_t, seq_len, d, dtype]
+            ](
+                k_t,
+                k_tensor,
+                grid_dim=transpose_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
+            # k_t = k_tensor.transpose()
 
             # Step 3: Compute attention scores using matmul: Q @ K^T = (1, d) @ (d, seq_len) -> (1, seq_len)
             # GPU: Uses matrix multiplication to compute all Q · K[i] scores in parallel
             # Reuse scores_weights_buf as (1, seq_len) for scores
             # FILL ME IN 2 lines
-
+            scores_2d = LayoutTensor[
+                mut=True, dtype, layout_scores_2d,
+            ](scores_weights_buf.unsafe_ptr())
+            gpu_ctx.enqueue_function[
+                matmul_idiomatic_tiled[layout_q_2d, 1, seq_len, d, dtype]
+            ](
+                scores_2d,
+                q_2d,
+                k_t,
+                grid_dim=scores_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
             # Step 4: Reshape scores from (1, seq_len) to (seq_len,) for softmax
             # FILL ME IN 1 line
+            scores_1d = scores_2d.reshape[layout_scores]()
 
             # Step 5: Apply softmax to get attention weights
             # FILL ME IN 1 function call
-
+            gpu_ctx.enqueue_function[
+                softmax_kernel[layout_scores, seq_len, dtype]
+            ](
+                scores_1d,
+                scores_1d,
+                grid_dim=(1, 1),
+                block_dim=(seq_len, 1),
+            )
             # Step 6: Reshape weights from (seq_len,) to (1, seq_len) for final matmul
             # FILL ME IN 1 line
+            weights = scores_1d.reshape[layout_weights_2d]()
 
             # Step 7: Compute final result using matmul: weights @ V = (1, seq_len) @ (seq_len, d) -> (1, d)
             # Reuse out_tensor reshaped as (1, d) for result
             # FILL ME IN 2 lines
+            result_2d = output_tensor.reshape[layout_result_2d]()
+            gpu_ctx.enqueue_function[
+                matmul_idiomatic_tiled[layout_weights_2d, 1, d, seq_len, dtype]
+            ](
+                result_2d,
+                weights,
+                v_tensor,
+                grid_dim=result_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
+
 
             # ANCHOR_END: attention_orchestration
 
